@@ -1,0 +1,193 @@
+"""
+Telegram Video Downloader Bot
+Python 3.11+ | aiogram 3.x
+"""
+
+import asyncio
+import os
+import re
+from pathlib import Path
+from typing import Optional
+import logging
+
+try:
+    from aiogram import Bot, Dispatcher, F
+    from aiogram.filters import Command
+    from aiogram.types import Message, FSInputFile
+    from aiogram.enums import ParseMode
+    import yt_dlp
+except ImportError as e:
+    print(f"Kutubxona topilmadi: {e}")
+    print("O'rnatish: pip install aiogram yt-dlp")
+    exit(1)
+
+# ===== KONFIGURATSIYA =====
+from config import API_TOKEN
+DOWNLOAD_DIR = Path("downloads")
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+# Telegram file size cheklovi (bayt)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB (oddiy botlar uchun)
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ===== BOT SOZLAMALARI =====
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+
+# ===== PLATFORMANI ANIQLASH =====
+def detect_platform(url: str) -> Optional[str]:
+    """URL dan platformani aniqlaydi"""
+    patterns = {
+        'tiktok': r'(tiktok\.com|vm\.tiktok\.com)',
+        'instagram': r'(instagram\.com|instagr\.am)',
+        'youtube': r'(youtube\.com|youtu\.be)\/shorts',
+        'facebook': r'(facebook\.com|fb\.watch)',
+        'twitter': r'(twitter\.com|x\.com)',
+        'telegram': r't\.me\/'
+    }
+
+    for platform, pattern in patterns.items():
+        if re.search(pattern, url, re.IGNORECASE):
+            return platform
+    return None
+
+
+# ===== VIDEO YUKLAB OLISH =====
+async def download_video(url: str, user_id: int) -> Optional[Path]:
+    """yt-dlp yordamida video yuklab oladi"""
+    output_path = DOWNLOAD_DIR / f"{user_id}_%(id)s.%(ext)s"
+
+    ydl_opts = {
+        'format': 'best[filesize<?50M]/best',
+        'outtmpl': str(output_path),
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+        'socket_timeout': 30,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+            filename = ydl.prepare_filename(info)
+            file_path = Path(filename)
+
+            if file_path.exists():
+                # Fayl hajmini tekshirish
+                if file_path.stat().st_size > MAX_FILE_SIZE:
+                    file_path.unlink()
+                    return None
+                return file_path
+    except Exception as e:
+        logger.error(f"Yuklab olishda xato: {e}")
+
+    return None
+
+
+# ===== /START BUYRUG'I =====
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        "🎥 <b>Video Yuklovchi Botga xush kelibsiz!</b>\n\n"
+        "Men quyidagi platformalardan video yuklab bera olaman:\n"
+        "✅ TikTok\n"
+        "✅ Instagram Reels\n"
+        "✅ YouTube Shorts\n"
+        "✅ Facebook\n"
+        "✅ Twitter/X\n"
+        "✅ Telegram (jamoat kanallari)\n\n"
+        "📎 Video havolasini yuboring va men uni yuklab beraman!\n"
+        "ℹ️ Batafsil: /help"
+    )
+
+
+# ===== /HELP BUYRUG'I =====
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "📚 <b>Qo'llanma</b>\n\n"
+        "<b>Qanday foydalanish:</b>\n"
+        "1. Video havolasini botga yuboring\n"
+        "2. Bot videoni yuklab olib, sizga yuboradi\n\n"
+        "<b>Cheklovlar:</b>\n"
+        "• Maksimal hajm: 50 MB\n"
+        "• Faqat jamoat videolari\n\n"
+        "<b>Qo'llab-quvvatlanadi:</b>\n"
+        "TikTok, Instagram, YouTube Shorts, Facebook, Twitter/X, Telegram"
+    )
+
+
+# ===== /ABOUT BUYRUG'I =====
+@dp.message(Command("about"))
+async def cmd_about(message: Message):
+    await message.answer(
+        "ℹ️ <b>Bot haqida</b>\n\n"
+        "🤖 Video Yuklovchi Bot\n"
+        "📦 Versiya: 1.0.0\n"
+        "🛠 Python 3.11 + aiogram 3.x\n"
+        "📹 yt-dlp asosida\n\n"
+        "💡 Bot faqat ta'lim maqsadida yaratilgan."
+    )
+
+
+# ===== VIDEO HAVOLA QAYTA ISHLASH =====
+@dp.message(F.text)
+async def handle_url(message: Message):
+    url = message.text.strip()
+
+    # URL tekshirish
+    if not url.startswith(('http://', 'https://')):
+        await message.answer("❌ Iltimos, to'g'ri havola yuboring!")
+        return
+
+    # Platformani aniqlash
+    platform = detect_platform(url)
+    if not platform:
+        await message.answer("❌ Bu platforma qo'llab-quvvatlanmaydi!")
+        return
+
+    status_msg = await message.answer(f"⏳ {platform.title()} dan video yuklab olinmoqda...")
+
+    # Video yuklab olish
+    video_path = await download_video(url, message.from_user.id)
+
+    if video_path and video_path.exists():
+        try:
+            # Videoni yuborish
+            video_file = FSInputFile(video_path)
+            await message.answer_video(
+                video=video_file,
+                caption=f"✅ {platform.title()} dan yuklandi"
+            )
+            await status_msg.delete()
+
+            # Faylni o'chirish
+            video_path.unlink()
+        except Exception as e:
+            logger.error(f"Yuborishda xato: {e}")
+            await status_msg.edit_text("❌ Videoni yuborishda xato yuz berdi!")
+            if video_path.exists():
+                video_path.unlink()
+    else:
+        await status_msg.edit_text(
+            "❌ Video yuklab olinmadi!\n\n"
+            "Sabablari:\n"
+            "• Video juda katta (>50MB)\n"
+            "• Havola noto'g'ri\n"
+            "• Shaxsiy akkaunt\n"
+            "• Platforma cheklovi"
+        )
+
+
+# ===== BOTNI ISHGA TUSHIRISH =====
+async def main():
+    logger.info("Bot ishga tushmoqda...")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
